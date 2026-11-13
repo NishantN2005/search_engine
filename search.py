@@ -122,7 +122,7 @@ def run_report(engine, top_k, out_path="ms2_results.txt"):
         total, results, ms = timed_search(engine, q, top_k)
         print_results(q, total, results, ms)
         lines.append(f'Query: "{q}"  ({total:,} matches, {ms:.1f} ms)')
-        lines += [f"  {i}. {url}" for i, (url, ) in enumerate(results, 1)]
+        lines += [f"  {i}. {url}" for i, (url, _) in enumerate(results, 1)]
         lines.append("")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -141,7 +141,7 @@ def main():
         if args.report:
             run_report(engine, args.top)
         elif args.query:
-            print_results(args.query, timed_search(engine, args.query, args.top))
+            print_results(args.query, *timed_search(engine, args.query, args.top))
         else:
             print("Enter a query (blank line or Ctrl-C to quit).")
             while True:
@@ -152,10 +152,10 @@ def main():
                     break
                 if not q:
                     break
-                print_results(q,timed_search(engine, q, args.top))
+                print_results(q, *timed_search(engine, q, args.top))
     finally:
         engine.close()
 
 
-if __name__ == "main":
+if __name__ == "__main__":
     main()
