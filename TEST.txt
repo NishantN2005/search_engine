@@ -3,9 +3,13 @@ CS121 Assignment 3 - Milestone 3 Test Queries
 
 20 queries used to evaluate ranking quality (effectiveness) and response
 time (efficiency). Queries 1-10 performed well; queries 11-20 performed
-poorly on one or both criteria. For each poor query we note what went wrong.
+poorly on one or both criteria.
 
-Setup: index built from DEV (55,393 documents, 1,066,436 unique terms).
+Parts A and B record the BASELINE results (the Milestone 2 engine) and
+what went wrong. Part C describes each change we made to fix the poor
+queries and the measured before/after results.
+
+Baseline setup: index built from DEV (55,393 documents, 1,066,436 unique terms).
 Each query was run 3 times; the time shown is the median, measured
 inside SearchEngine.search() (index already loaded). Top 10 results
 were inspected for each query.
@@ -15,7 +19,7 @@ efficiency" below means slow relative to the other queries.
 
 
 ---------------------------------------------------------------
-PART A - QUERIES THAT PERFORMED WELL (10)
+PART A - BASELINE: QUERIES THAT PERFORMED WELL (10)
 ---------------------------------------------------------------
 
 1. cristina lopes                    84 matches, 0.3 ms
@@ -66,7 +70,7 @@ PART A - QUERIES THAT PERFORMED WELL (10)
 
 
 ---------------------------------------------------------------
-PART B - QUERIES THAT PERFORMED POORLY (10)
+PART B - BASELINE: QUERIES THAT PERFORMED POORLY (10)
 ---------------------------------------------------------------
 
 11. machine learning                 4,419 matches, 9.2 ms
@@ -154,10 +158,10 @@ PART B - QUERIES THAT PERFORMED POORLY (10)
 
 
 ---------------------------------------------------------------
-ROOT CAUSES FOUND
+ROOT CAUSES FOUND (BASELINE)
 ---------------------------------------------------------------
 - Duplicate documents: 1,601 URLs are indexed twice, so the same page
-  takes two result slots (queries 1, 8, 9, 11, 12, 13, 14, 19).
+  takes two result slots (queries 1, 4, 8, 9, 11, 12, 13, 14, 17, 19).
 - No document length normalization: long listing/bibliography pages
   win (11, 12, 14, 17, 19).
 - Stop words / very common terms: huge postings lists are fully parsed
@@ -167,3 +171,82 @@ ROOT CAUSES FOUND
 - Flat important-tag bonus doesn't separate <title> from <b> (13, 18).
 - No phrase/proximity scoring (12, 19).
 - Tokenizer drops symbols and splits hyphens (10, 20).
+
+
+===============================================================
+PART C - IMPROVEMENTS AND THEIR EFFECT
+===============================================================
+
+---------------------------------------------------------------
+Improvement 1: Exact and near-duplicate detection (indexer.py)
+---------------------------------------------------------------
+Problem it targets: duplicate pages taking two result slots (queries
+1, 4, 8, 9, 11, 12, 13, 14, 17, 19) and wasted work on postings for copies.
+
+What we did. While indexing, each page goes through three checks before
+it gets a doc id; a page that fails any of them is skipped and logged to
+index_data/duplicates.txt:
+  1. Same URL (after removing the #fragment) already indexed -> skip.
+  2. Exact duplicate: MD5 checksum of the page's token sequence. If the
+     checksum was already seen, skip. This catches the same page served
+     under two URLs, e.g. /faculty/ vs /faculty/index.php, or
+     view_news?id=1187 vs view_news.php?id=1187.
+  3. Near duplicate: a 64-bit SimHash fingerprint of the page (only for
+     pages with >= 50 tokens, where SimHash is reliable). Each word is
+     hashed to 64 bits and each distinct word votes +/- once on every
+     bit (not once per occurrence; see "Side effect found and fixed"
+     below); the fingerprint keeps the bits with positive votes. If a
+     kept page's fingerprint differs in <= 3 of 64 bits, the new page is
+     a near duplicate and is skipped.
+     This catches pages that differ only in a date, counter or ad, such
+     as successive versions of the same wiki page.
+
+The technique is general: it doesn't depend on any particular query,
+site or URL pattern.
+
+Results (baseline -> with duplicate detection):
+  Pages skipped: 1,601 repeated URLs, 3,214 exact duplicates and
+  9,088 near duplicates. The index went from 55,393 to 41,490
+  documents.
+
+  Query                              matches        time (ms)   dup URLs in top 10
+  1  cristina lopes                     84 ->    60   0.3 ->  0.2    3 -> 0
+  4  informatics                     4,598 -> 3,121   3.8 ->  2.9    1 -> 0
+  8  hackathon                         238 ->   137   0.2 ->  0.1    1 -> 0
+  9  master of software engineering  1,749 ->   936  26.4 -> 16.9    2 -> 0
+  11 machine learning                4,419 -> 2,377   9.2 ->  4.8    3 -> 0
+  12 data science                    5,045 -> 2,699  14.9 ->  8.5    2 -> 0
+  13 graduate admissions             2,073 -> 1,215   4.4 ->  2.6    2 -> 0
+  14 how to apply to the university  1,940 -> 1,409  74.2 -> 45.9    4 -> 0
+     of california irvine
+  17 cristina lopes software ...      21 ->    14  28.7 -> 18.3    1 -> 0
+  18 ics                            18,691 -> 10,478  14.9 ->  8.7    0 -> 0
+  19 computer science               12,941 -> 8,966  21.5 -> 15.1    1 -> 0
+
+  - No query has a repeated page in its top 10 any more (there were 20
+    repeated slots across the 20 queries).
+  - Queries are 1.3-2x faster because postings lists are shorter
+    (slowest query, #14: 74 ms -> 46 ms).
+  - Ranking improved where duplicates were the main problem:
+    "cristina lopes" now shows 10 different pages about her (profile,
+    news archives, award and grant news) instead of 3 pages twice each;
+    "machine learning" no longer spends 4 of its top 10 slots on two
+    copies each of two blog listing pages.
+  - Duplicate detection doesn't fix the ranking problems that come
+    from long listing pages (11, 12, 14, 19); those are next.
+
+Side effect found and fixed:
+  The first version weighted each word's SimHash vote by its term
+  frequency. Because stop words are kept in the index, "the", "of",
+  "and" dominated the votes, so long unrelated English pages got
+  almost the same fingerprint. It removed 13,536 pages as near
+  duplicates; in a random sample of 300 of those pairs, 43 shared less
+  than half of their words (Jaccard similarity < 0.5). Real pages were
+  lost: the ICS graduate admissions page was dropped as a "duplicate" of
+  the graduate degrees page, and the 2009/2010 news archives were
+  dropped, so "cristina lopes" fell to 49 matches.
+  Fix: each distinct word votes once (binary weights). Near-duplicate
+  removals fell from 13,536 to 9,088. In a new random sample of 300
+  flagged pairs, 0 have Jaccard < 0.5 and the median Jaccard is 0.96.
+  The admissions page and both news archives are back in the index
+  ("cristina lopes": 49 -> 60 matches, archives at #2 and #3).

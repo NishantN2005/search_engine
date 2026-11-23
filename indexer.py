@@ -36,15 +36,18 @@ def simhash(tf):
     """64-bit fingerprint. Similar pages get similar fingerprints."""
     votes = [0] * 64
 
-    # Each word votes on every bit: + if its bit is 1, - if it is 0.
-    for word, count in tf.items():
+    # Each distinct word votes once on every bit: + if its bit is 1, - if it is 0.
+    # Votes are NOT weighted by term frequency: we keep stop words, so with tf
+    # weights "the"/"of"/"and" decide every bit and unrelated long pages end up
+    # with nearly identical fingerprints (false near-duplicates).
+    for word in tf:
         h = word_hash(word)
         for i in range(64):
             bit_is_one = (h >> i) & 1
             if bit_is_one:
-                votes[i] += count
+                votes[i] += 1
             else:
-                votes[i] -= count
+                votes[i] -= 1
 
     # Bits with more + votes become 1.
     fingerprint = 0
