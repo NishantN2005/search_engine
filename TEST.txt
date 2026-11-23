@@ -250,3 +250,143 @@ Side effect found and fixed:
   flagged pairs, 0 have Jaccard < 0.5 and the median Jaccard is 0.96.
   The admissions page and both news archives are back in the index
   ("cristina lopes": 49 -> 60 matches, archives at #2 and #3).
+
+---------------------------------------------------------------
+How ranking was measured for Improvements 2-4
+---------------------------------------------------------------
+For each query (except "the") we wrote down which pages a user would
+actually want, e.g. Cristina Lopes's faculty profile for "cristina
+lopes", the MSWE program pages for "master of software engineering",
+cs.uci.edu or the CS department faculty page for "computer science".
+We then recorded the rank of the first such page in the top 10 and
+averaged 1/rank over the queries (mean reciprocal rank, MRR; 1.0 =
+every query has a good page at #1, 0 = none in the top 10).
+Index for all numbers below: the de-duplicated index (41,490 docs).
+
+---------------------------------------------------------------
+Improvement 2: BM25 ranking with page-length normalization (search.py)
+---------------------------------------------------------------
+Problem it targets: long listing / bibliography / archive pages won
+because the old tf-idf score grew with raw term counts and was never
+normalized by page length (queries 11, 12, 14, 17, 19, 20).
+
+What we did. Replaced the score with BM25:
+    score(d) = sum over query terms t of
+               idf(t) * tf' * (k1 + 1) / (tf' + k1 * (1 - b + b * len(d)/avg_len))
+    idf(t)   = log(1 + (N - df + 0.5) / (df + 0.5))
+  - Extra occurrences of a word add less and less (saturation, k1=1.2),
+    so a page that repeats "machine learning" 80 times no longer beats a
+    page that is about machine learning.
+  - Scores are divided by how long the page is relative to the average
+    page (b=0.75), using page lengths already stored in docs.txt.
+  - Important-tag text is folded into the term frequency: an occurrence
+    in title/h1-h3/b/strong counts as 1 + 2 = 3 occurrences
+    (tf' = tf + 2 * important_tf), instead of the old flat +2 bonus.
+We used the standard BM25 values (k1=1.2, b=0.75). We also tried
+b = 0.3 / 0.5 and important weights 1 / 4; b=0.75 with weight 2 was
+best or tied, so we kept the textbook defaults rather than tuning to
+our queries.
+
+Results (old tf-idf -> BM25), position of the first good page:
+  12 data science                    not in top 10 -> #1 (B.S. in Data Science)
+  19 computer science                #6 -> #1 (CS department faculty page;
+                                     cs.uci.edu home page is now #5)
+  20 c++ programming                 not in top 10 -> #1 (ICS 45C C++ course)
+  13 graduate admissions             #7 -> #3 (Informatics graduate
+                                     application process is #4)
+  3  donald bren school              #3 -> #1 (Bren Hall page)
+  17 cristina lopes ... (long query) #4 -> #2 (her ICS faculty profile)
+  11 machine learning                top 5 are now CML machine learning
+                                     workshop/symposium pages instead of
+                                     blog category listings and long
+                                     publication lists
+  Overall MRR@10: 0.52 -> 0.71 (with Improvements 3 and 4).
+
+Side effects we observed (short pages now favored slightly too much):
+  - "eppstein": #1 is still his home page, but two .git log files from
+    his PADS project are #2-3 (short text files full of his name).
+  - "cristina lopes": a student's home page that lists her as advisor is
+    #1; her profile is #2.
+  - "richard pattis": his home page dropped from #1 to #4 (#2 is his
+    faculty profile).
+  These are short pages where the query word is a large part of the
+  text. The next planned change (weighting <title> separately and adding
+  URL words) addresses them.
+
+---------------------------------------------------------------
+Improvement 3: Ignore very common words when the query has specific ones
+---------------------------------------------------------------
+Problem it targets: slow queries containing stop words (9, 14, 15).
+The index keeps every word (no stop-word removal, as required), so
+"of" (in 63% of pages), "the" (54%), "and", "to", "a", "in" and "for"
+have very long postings lists. The old search read and parsed each of
+them fully, even though they add almost nothing to the score.
+
+What we did (all in search.py, the index is unchanged):
+  - Before loading any postings we read only each term's document
+    frequency, which is stored at the start of its line in index.txt
+    (a few bytes, instead of parsing the whole list).
+  - A term that appears in more than 35% of all pages is treated as a
+    stop word, but only when the query also contains a more specific
+    term. Those terms are not loaded, required or scored. The 35%
+    cut-off is a gap in the data: the next most common words, such as
+    "comput" (32%) and "project" (27%), are content words.
+  - A query made only of common words ("the", "the of and")
+    still uses all of its words, so it always gets results
+    (e.g. "the of and": 17,023 matches).
+  - Postings are parsed in one pass with built-in functions
+    (str.split + map(int)) instead of a Python loop per posting, AND
+    intersection starts from the shortest list, and the top k results
+    are selected with heapq.nlargest instead of sorting every match.
+
+Results (time per query):
+  14 how to apply to the university of california irvine  45.9 -> 15.6 ms
+  9  master of software engineering                       16.9 ->  6.5 ms
+  15 the                                                  24.3 -> 21.6 ms
+  The slowest of our 20 queries is now 21.6 ms ("the"), down from
+  74.2 ms at the start. Ranking for "master of software engineering"
+  also improved: mswe.ics.uci.edu is now #1.
+  Query 14 is now fast but still ranks poorly (news pages, no
+  admissions page); it needs the title/URL weighting planned next.
+
+---------------------------------------------------------------
+Improvement 4: Spelling correction and partial-match fallback
+---------------------------------------------------------------
+Problem it targets: queries that returned almost nothing because every
+term had to be present (16 "machine lerning", 17 long query).
+
+What we did (search.py):
+  1. Run the normal "every term must match" search.
+  2. If it returns fewer than k pages, look for typos: for each query
+     word with at least 4 letters that appears in 5 or fewer pages, try
+     every word one edit away (delete, swap, replace or insert one
+     character), stem it, and look up its document frequency. If one
+     is at least 20 times more common, use it instead and tell the user
+     ("showing results for: ..."). Only rare words are touched, so
+     normal names and terms are never "corrected".
+  3. If there are still fewer than k pages, also include pages that
+     contain only some of the terms. Results are ordered first by how
+     many query terms they contain, then by BM25 score, so pages with
+     every term always come first. The user sees a note that partial
+     matches are included.
+
+Results:
+  16 machine lerning   1 match (a word list file) -> corrected to
+                       "machine learning": 2,377 matches, CML machine
+                       learning pages at the top, 7.6 ms.
+  Other examples: "eppstien" -> "eppstein" (his home page #1);
+  "cristina lopes zzqxqvv" -> no page has all 3 words, so the partial
+  match fallback returns her pages instead of 0 results.
+  17 (long Lopes query) has 14 full matches, so the fallback isn't
+  needed; it improved through BM25 (Improvement 2).
+
+---------------------------------------------------------------
+Still poor after Improvements 1-4
+---------------------------------------------------------------
+  14 how to apply to the university of california irvine - no
+     admissions page in the top 10.
+  18 ics - the ICS home page is not in the top 10.
+  Short-page side effects listed under Improvement 2.
+  Planned next: weight <title> matches separately from bold text and
+  add words from the URL, and keep "c++" / join "wi-fi" in the
+  tokenizer (these need an index rebuild).
