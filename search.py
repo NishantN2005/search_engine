@@ -2,10 +2,9 @@ import argparse
 import heapq
 import math
 import os
-import re
 import time
 
-from tokenizer import stem
+from tokenizer import stem, tokenize, words
 
 DEFAULT_INDEX_DIR = "index_data"
 DEFAULT_TOP_K = 5
@@ -14,6 +13,8 @@ DEFAULT_TOP_K = 5
 BM25_K1 = 1.2           # how quickly extra occurrences of a word stop adding score
 BM25_B = 0.75           # how strongly scores are normalized by page length (0 = not at all)
 IMPORTANT_WEIGHT = 2.0  # an occurrence in title/h1-h3/b/strong counts as 1 + this
+TITLE_WEIGHT = 3.0      # an occurrence in <title> counts this much more on top of that
+URL_WEIGHT = 0.5        # a query term in the page's URL adds URL_WEIGHT * idf to the score
 
 # Very common words: a term found in more than this fraction of pages is treated
 # like a stop word and ignored when the query also has more specific terms.
@@ -25,9 +26,6 @@ TYPO_MAX_DF = 5
 TYPO_MIN_GAIN = 20
 TYPO_MIN_LENGTH = 4     # don't "correct" very short words
 ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-# Same token rule as tokenizer.tokenize(); we keep the raw word for spelling fixes.
-WORD_RE = re.compile(r"[a-z0-9]+")
 
 MS2_QUERIES = [
     "cristina lopes",
@@ -43,6 +41,11 @@ class SearchEngine:
         self.urls, self.doc_lengths = self._load_docs(os.path.join(index_dir, "docs.txt"))
         self.num_docs = len(self.urls)
         self.avg_doc_length = sum(self.doc_lengths) / max(1, self.num_docs)
+        # Precomputed per page (once, at startup) so scoring a query is just lookups:
+        # the BM25 length factor, and the set of stemmed words in the page's URL.
+        self.length_norm = [BM25_K1 * (1 - BM25_B + BM25_B * n / self.avg_doc_length)
+                            for n in self.doc_lengths]
+        self.url_terms = [frozenset(tokenize(url)) for url in self.urls]
         self.index_file = open(os.path.join(index_dir, "index.txt"), "rb")
         self.last_notes = []  # messages about the last query (spelling fix, partial matches)
 
@@ -80,25 +83,25 @@ class SearchEngine:
         return int(header.split(b"\t")[1])
 
     def get_postings(self, term):
-        #reads a term's postings from the index file as {doc_id: (term_freq, important_freq)}
+        #reads a term's postings as {doc_id: (term_freq, important_freq, title_freq)}
         offset = self.offsets.get(term)
         if offset is None:
             return {}
         self.index_file.seek(offset)
         line = self.index_file.readline().decode("utf-8").rstrip("\n")
-        # "d,tf,imp;d,tf,imp;..." -> one flat list of ints (fast: done in C, not a Python loop)
+        # "d,tf,imp,title;..." -> one flat list of ints (fast: done in C, not a Python loop)
         nums = list(map(int, line.split("\t")[2].replace(";", ",").split(",")))
-        return dict(zip(nums[0::3], zip(nums[1::3], nums[2::3])))
+        return dict(zip(nums[0::4], zip(nums[1::4], nums[2::4], nums[3::4])))
 
     def idf(self, df):
         #BM25 idf: rare terms count a lot, terms in almost every page count very little
         return math.log(1 + (self.num_docs - df + 0.5) / (df + 0.5))
 
-    def _bm25(self, doc_id, term_freq, important_freq, idf):
-        #BM25 score of one term in one document
-        tf = term_freq + IMPORTANT_WEIGHT * important_freq
-        length_norm = 1 - BM25_B + BM25_B * self.doc_lengths[doc_id] / self.avg_doc_length
-        return idf * tf * (BM25_K1 + 1) / (tf + BM25_K1 * length_norm)
+    def _bm25(self, doc_id, term_freq, important_freq, title_freq, idf):
+        #BM25 score of one term in one document. Occurrences in important places
+        #(title, headings, bold) count as extra occurrences.
+        tf = term_freq + IMPORTANT_WEIGHT * important_freq + TITLE_WEIGHT * title_freq
+        return idf * tf * (BM25_K1 + 1) / (tf + self.length_norm[doc_id])
 
     def _drop_common_terms(self, terms, dfs):
         #ignore stop-word-like terms when the query also has more specific ones
@@ -117,11 +120,12 @@ class SearchEngine:
         inserts = [a + c + b for a, b in splits for c in ALPHABET]
         return set(deletes + swaps + replaces + inserts)
 
-    def _correct_spelling(self, words, terms, dfs):
+    def _correct_spelling(self, query_words, terms, dfs):
         #replace very rare query words with a much more common word one edit away
         changed = False
-        for i, (word, term) in enumerate(zip(words, terms)):
-            if dfs[term] > TYPO_MAX_DF or len(word) < TYPO_MIN_LENGTH or word.isdigit():
+        for i, (word, term) in enumerate(zip(query_words, terms)):
+            if (dfs[term] > TYPO_MAX_DF or len(word) < TYPO_MIN_LENGTH
+                    or not word.isalpha()):
                 continue
             best, best_df = None, max(dfs[term], 1) * TYPO_MIN_GAIN - 1
             for candidate in self._spelling_candidates(word):
@@ -132,7 +136,7 @@ class SearchEngine:
                 if df > best_df:
                     best, best_df = candidate, df
             if best is not None:
-                words[i], terms[i] = best, stem(best)
+                query_words[i], terms[i] = best, stem(best)
                 dfs[terms[i]] = best_df
                 changed = True
         return changed
@@ -142,19 +146,25 @@ class SearchEngine:
         scores, matched = {}, {}
         for term, postings in postings_per_term.items():
             idf = self.idf(len(postings))
+            # URL bonus is added outside the length normalization, so a tiny page
+            # doesn't get a bigger URL boost than a normal page from the same site.
+            url_bonus = URL_WEIGHT * idf
             for doc_id in doc_ids:
                 entry = postings.get(doc_id)
                 if entry is None:
                     continue
-                scores[doc_id] = scores.get(doc_id, 0) + self._bm25(doc_id, entry[0], entry[1], idf)
+                score = self._bm25(doc_id, *entry, idf)
+                if term in self.url_terms[doc_id]:
+                    score += url_bonus
+                scores[doc_id] = scores.get(doc_id, 0) + score
                 matched[doc_id] = matched.get(doc_id, 0) + 1
         return heapq.nlargest(top_k, scores.items(), key=lambda item: (matched[item[0]], item[1]))
 
     def search(self, query, top_k=DEFAULT_TOP_K):
         #returns (number of matches, top_k (url, score) pairs); notes go to self.last_notes
         self.last_notes = []
-        words = list(dict.fromkeys(WORD_RE.findall(query.lower())))  # unique, in order
-        terms = [stem(w) for w in words]
+        query_words = list(dict.fromkeys(words(query, query=True)))  # unique, in order
+        terms = [stem(w) for w in query_words]
         if not terms:
             return 0, []
         dfs = {t: self.get_df(t) for t in terms}
@@ -165,8 +175,8 @@ class SearchEngine:
         matching = self._intersect(postings)
 
         # 2) Too few results: maybe a typo. Fix very rare words and try again.
-        if len(matching) < top_k and self._correct_spelling(words, terms, dfs):
-            self.last_notes.append("showing results for: " + " ".join(words))
+        if len(matching) < top_k and self._correct_spelling(query_words, terms, dfs):
+            self.last_notes.append("showing results for: " + " ".join(query_words))
             required = self._drop_common_terms(terms, dfs)
             postings = {t: self.get_postings(t) for t in required}
             matching = self._intersect(postings)

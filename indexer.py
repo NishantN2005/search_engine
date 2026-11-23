@@ -95,8 +95,13 @@ def iter_corpus(corpus_dir):
 
 # Partial index I/O
 def format_postings(postings):
-    """[(doc_id, tf, imp), ...] -> 'doc_id,tf,imp;doc_id,tf,imp'"""
-    return ";".join(f"{d},{tf},{imp}" for d, tf, imp in postings)
+    """[(doc_id, tf, imp, title), ...] -> 'doc_id,tf,imp,title;doc_id,tf,imp,title'
+
+    tf    = occurrences anywhere in the page
+    imp   = occurrences inside title/h1/h2/h3/b/strong
+    title = occurrences inside <title>
+    """
+    return ";".join(f"{d},{tf},{imp},{title}" for d, tf, imp, title in postings)
 
 
 def write_partial(index, path):
@@ -157,7 +162,7 @@ def build_index(corpus_dir, out_dir, batch_size):
     partial_dir = os.path.join(out_dir, "partials")
     os.makedirs(partial_dir, exist_ok=True)
 
-    index = defaultdict(list)  # term -> [(doc_id, tf, imp_tf), ...]
+    index = defaultdict(list)  # term -> [(doc_id, tf, imp_tf, title_tf), ...]
     partial_paths = []
     doc_id = 0
 
@@ -186,7 +191,7 @@ def build_index(corpus_dir, out_dir, batch_size):
                 continue
             seen_urls.add(url)
 
-            all_tokens, important_tokens = parse_page(html)
+            all_tokens, important_tokens, title_tokens = parse_page(html)
             tf = Counter(all_tokens)
 
             # Exact duplicate?
@@ -213,9 +218,10 @@ def build_index(corpus_dir, out_dir, batch_size):
                 fingerprints.append((fp, url))
 
             imp = Counter(important_tokens)
+            title = Counter(title_tokens)
 
             for term, count in tf.items():
-                index[term].append((doc_id, count, imp.get(term, 0)))
+                index[term].append((doc_id, count, imp.get(term, 0), title.get(term, 0)))
 
             docs.write(f"{doc_id}\t{url}\t{len(all_tokens)}\n")
             doc_id += 1
@@ -266,7 +272,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 
 
