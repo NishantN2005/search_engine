@@ -1,0 +1,169 @@
+CS121 Assignment 3 - Milestone 3 Test Queries
+==============================================
+
+20 queries used to evaluate ranking quality (effectiveness) and response
+time (efficiency). Queries 1-10 performed well; queries 11-20 performed
+poorly on one or both criteria. For each poor query we note what went wrong.
+
+Setup: index built from DEV (55,393 documents, 1,066,436 unique terms).
+Each query was run 3 times; the time shown is the median, measured
+inside SearchEngine.search() (index already loaded). Top 10 results
+were inspected for each query.
+
+Every query finished well under 300 ms (slowest: 74 ms), so "poor
+efficiency" below means slow relative to the other queries.
+
+
+---------------------------------------------------------------
+PART A - QUERIES THAT PERFORMED WELL (10)
+---------------------------------------------------------------
+
+1. cristina lopes                    84 matches, 0.3 ms
+   GOOD. Her faculty profile is #1 and the rest of the top 10 are news
+   items about her. Very fast because both terms are rare.
+   Small issue: the profile and two news pages each appear twice
+   (duplicate documents, see "Root causes").
+
+2. ACM                               3,646 matches, 2.7 ms
+   GOOD. Returns faculty publication lists (~eppstein, ~gmark, ~amirr1,
+   ~majumder) that are full of ACM venues. Reasonable for a 1-word query.
+
+3. donald bren school                3,046 matches, 9.8 ms
+   MOSTLY GOOD. "About the Bren School" (#3) and Bren Hall pages (#4-5)
+   are in the top 5. A 2007 news-notes page is #1 because it repeats
+   the name many times.
+
+4. informatics                       4,598 matches, 3.8 ms
+   GOOD. Informatics people page, ICS faculty pages filtered by the
+   Informatics department, and the Informatics degree page.
+
+5. eppstein                          1,333 matches, 0.9 ms
+   GOOD. All top 10 are David Eppstein's home and publication pages.
+
+6. ics 31                            2,593 matches, 14.8 ms
+   GOOD. ICS 31 lecture/course pages (Pattis, Kay) and the "ICS 31
+   Credit by Exam" page. One bad hit at #1: a raw dataset text file
+   (mondego maven-contents.txt) that happens to contain both tokens.
+
+7. richard pattis                    111 matches, 0.5 ms
+   GOOD. His home page is #1, his faculty profile is in the top 5.
+
+8. hackathon                         238 matches, 0.2 ms
+   GOOD. Hackathon event category page, Women's Hackathon, IoT
+   hackathon news. Duplicates at #1-2 and news pages reachable by two
+   URLs (view_news vs view_news.php).
+
+9. master of software engineering    1,749 matches, 26.4 ms
+   GOOD ranking: MSWE program page, curriculum, home, admissions, FAQ.
+   Slower than other 2-term-ish queries: loading the postings for "of"
+   (df 37,569, the largest list in the index) costs ~13 ms by itself.
+   Duplicate of /grad/mswe/ at #1-2.
+
+10. wifi                             74 matches, 0.1 ms
+   GOOD. "WiFi at Mumbai airport", WiFi positioning dataset, "camera
+   with wifi". Recall gap: 39 pages write "Wi-Fi", which the tokenizer
+   splits into "wi" + "fi", so they never match "wifi".
+
+
+---------------------------------------------------------------
+PART B - QUERIES THAT PERFORMED POORLY (10)
+---------------------------------------------------------------
+
+11. machine learning                 4,419 matches, 9.2 ms
+   POOR (ranking).
+   - #1-4 and #8-9 are CML blog category listing pages
+     (cml.ics.uci.edu/category/aiml/...), each appearing twice.
+   - #5-6 are Pazzani's long publication lists.
+   - No page that is actually about ML (e.g. the ML repository home or
+     a course page) is in the top 5.
+   Cause: duplicates take 2 slots each, and long listing pages with many
+   occurrences win because scores are not normalized by document length.
+
+12. data science                     5,045 matches, 14.9 ms
+   POOR (ranking). Same CML category listing pages at #1-4 (duplicated),
+   then news notes and Eppstein publication lists. No Data Science
+   program/degree page in the top 10.
+   Cause: same as 11 (duplicates, no length normalization, no
+   phrase/proximity bonus for "data science" appearing together).
+
+13. graduate admissions              2,073 matches, 4.4 ms
+   POOR (ranking). #1-2 are MCS "once admitted" pages, #3-4 are the
+   Informatics site map (duplicated), #5 is an ICS 1C homework page.
+   The real ICS graduate admissions page (/grad/admissions/) is absent
+   from the top 10 even though it appears for query 9.
+   Cause: site maps and navigation-heavy pages contain both words; the
+   important-tag bonus is a flat +2 whether the word is in the <title>
+   or just in a <b> tag, so the actual admissions page doesn't stand out.
+
+14. how to apply to the university of california irvine
+                                     1,940 matches, 74.2 ms (slowest)
+   POOR (efficiency and ranking).
+   - Slowest query in the set. Loading postings for "of" (13 ms),
+     "the" (13 ms), "to" (11-13 ms) and "how" (7 ms) is about half
+     the time, for words that add almost nothing to the score.
+   - Results are the CML listing pages (duplicated), a faculty home
+     page and the internship page. No admissions page.
+   Cause: stop words have huge postings lists that are fully parsed into
+   Python dicts; long pages win because every common word adds a little
+   score and there is no length normalization.
+
+15. the                              30,945 matches, 25.8 ms
+   POOR (efficiency and ranking). Every match is scored and sorted to
+   return 10 results. The top 10 are WebDAV protocol drafts (RFC text),
+   essentially arbitrary.
+   Cause: a stop word carries no information (idf about 0.25), and
+   there is no early termination.
+
+16. machine lerning   (typo)         1 match, 2.4 ms
+   POOR (recall). The only result is ~kay/wordlist.txt, a word list that
+   happens to contain "lerning". All 4,419 "machine learning" pages are
+   lost.
+   Cause: strict AND (every term must match) and no spelling correction
+   or fallback when a term is very rare.
+
+17. cristina lopes software engineering research projects ubiquitous computing
+                                     21 matches, 28.7 ms
+   POOR (ranking and recall). Only 21 pages contain all 8 terms. Her
+   informatics.uci.edu profile (#1 for query 1) is missing entirely; the
+   ICS faculty profile is only #3, behind two news-notes pages.
+   Cause: strict AND drops relevant pages missing any single word; long
+   multi-topic pages (news notes, faculty listings) contain all the words
+   and win.
+
+18. ics                              18,691 matches, 14.9 ms
+   POOR (ranking). Results are arbitrary course pages (ICS 45C project
+   guide, ICS H197 syllabus, course updates). The ICS home page is not
+   in the top 10.
+   Cause: "ics" (stemmed to "ic") appears in 1/3 of the corpus, so idf
+   is low and all top scores are nearly tied (2.25-2.30). The term
+   matches in titles everywhere, so the important-tag bonus doesn't help
+   distinguish pages.
+
+19. computer science                 12,941 matches, 21.5 ms
+   POOR (ranking). #1 is Eppstein's bibliography, #2-3 the duplicated
+   CML listing page. The CS department faculty pages show up at #5-10.
+   Cause: both words appear in navigation menus on most pages; no
+   phrase/proximity scoring and no length normalization.
+
+20. c++ programming                  4,200 matches, 11.7 ms
+   POOR (ranking). Top result is Eppstein's publication file (pubs.ff);
+   the rest are course pages for several languages.
+   Cause: the tokenizer keeps only [a-z0-9]+, so "c++" becomes "c". The
+   query is really "c programming", and "c" matches 8,604 pages
+   (initials, grades, Section C, etc.).
+
+
+---------------------------------------------------------------
+ROOT CAUSES FOUND
+---------------------------------------------------------------
+- Duplicate documents: 1,601 URLs are indexed twice, so the same page
+  takes two result slots (queries 1, 8, 9, 11, 12, 13, 14, 19).
+- No document length normalization: long listing/bibliography pages
+  win (11, 12, 14, 17, 19).
+- Stop words / very common terms: huge postings lists are fully parsed
+  even though they barely affect the score (9, 14, 15).
+- Strict AND with no fallback for rare or missing terms (16, 17).
+- Low-idf terms give no ranking signal (15, 18).
+- Flat important-tag bonus doesn't separate <title> from <b> (13, 18).
+- No phrase/proximity scoring (12, 19).
+- Tokenizer drops symbols and splits hyphens (10, 20).
