@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import heapq
 import json
 import os
@@ -10,6 +11,61 @@ from urllib.parse import urldefrag
 from html_parser import parse_page
 
 DEFAULT_BATCH_SIZE = 10_000  # documents per partial index
+SIMHASH_MAX_DIST = 3         # fingerprints differing in <= 3 of 64 bits are near-duplicates
+SIMHASH_MIN_TOKENS = 50      # simhash is unreliable on very short pages
+
+
+# Duplicate detection
+def page_checksum(tokens):
+    """MD5 of the page's words. Same words = same checksum."""
+    text = " ".join(tokens)
+    text_bytes = text.encode("utf-8")
+    checksum = hashlib.md5(text_bytes).hexdigest()
+    return checksum
+
+
+def word_hash(word):
+    """Turn a word into a 64-bit number (same word = same number)."""
+    word_bytes = word.encode("utf-8")
+    digest = hashlib.md5(word_bytes).digest()
+    first_8_bytes = digest[:8]   # 8 bytes = 64 bits
+    return int.from_bytes(first_8_bytes, "big")
+
+
+def simhash(tf):
+    """64-bit fingerprint. Similar pages get similar fingerprints."""
+    votes = [0] * 64
+
+    # Each word votes on every bit: + if its bit is 1, - if it is 0.
+    for word, count in tf.items():
+        h = word_hash(word)
+        for i in range(64):
+            bit_is_one = (h >> i) & 1
+            if bit_is_one:
+                votes[i] += count
+            else:
+                votes[i] -= count
+
+    # Bits with more + votes become 1.
+    fingerprint = 0
+    for i in range(64):
+        if votes[i] > 0:
+            fingerprint = fingerprint | (1 << i)
+    return fingerprint
+
+
+def bits_different(fp1, fp2):
+    """How many of the 64 bits differ between two fingerprints."""
+    differing = fp1 ^ fp2   # 1 where bits differ
+    return differing.bit_count()
+
+
+def find_near_duplicate(fp, fingerprints):
+    """URL of a kept page within 3 bits of fp, or None."""
+    for other_fp, other_url in fingerprints:
+        if bits_different(fp, other_fp) <= SIMHASH_MAX_DIST:
+            return other_url
+    return None
 
 
 
@@ -113,10 +169,46 @@ def build_index(corpus_dir, out_dir, batch_size):
               f"[{time.time() - start:.0f}s]")
         index = defaultdict(list)
 
-    with open(os.path.join(out_dir, "docs.txt"), "w", encoding="utf-8") as docs:
+    seen_urls = set()
+    checksums = {}             # checksum -> url of kept page
+    fingerprints = []          # [(simhash, url), ...] of kept pages
+    dups = Counter()           # "url" / "exact" / "near" -> pages skipped
+
+    with open(os.path.join(out_dir, "docs.txt"), "w", encoding="utf-8") as docs, \
+         open(os.path.join(out_dir, "duplicates.txt"), "w", encoding="utf-8") as dup_log:
         for url, html in iter_corpus(corpus_dir):
+            # Duplicates are skipped before getting a doc_id, so ids stay contiguous.
+            if url in seen_urls:
+                dups["url"] += 1
+                continue
+            seen_urls.add(url)
+
             all_tokens, important_tokens = parse_page(html)
             tf = Counter(all_tokens)
+
+            # Exact duplicate?
+            checksum = page_checksum(all_tokens)
+            if checksum in checksums:
+                original = checksums[checksum]
+                dups["exact"] += 1
+                dup_log.write(f"exact\t{original}\t{url}\n")
+                continue
+
+            # Near duplicate?
+            fp = None
+            if len(all_tokens) >= SIMHASH_MIN_TOKENS:
+                fp = simhash(tf)
+                original = find_near_duplicate(fp, fingerprints)
+                if original is not None:
+                    dups["near"] += 1
+                    dup_log.write(f"near\t{original}\t{url}\n")
+                    continue
+
+            # new page: remember it
+            checksums[checksum] = url
+            if fp is not None:
+                fingerprints.append((fp, url))
+
             imp = Counter(important_tokens)
 
             for term, count in tf.items():
@@ -140,6 +232,9 @@ def build_index(corpus_dir, out_dir, batch_size):
     stats = {
         "num_documents": doc_id,
         "num_unique_tokens": unique_terms,
+        "url_duplicates_skipped": dups["url"],
+        "exact_duplicates_skipped": dups["exact"],
+        "near_duplicates_skipped": dups["near"],
         "num_partial_indexes": len(partial_paths),
         "index_size_kb": round(kb(index_path), 1),
         "term_offsets_size_kb": round(kb(offsets_path), 1),
