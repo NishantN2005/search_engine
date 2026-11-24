@@ -27,3 +27,19 @@ python search.py --report               # run the 4 MS2 queries, save to ms2_res
 ```
 
 Options: `--index DIR` (default `index_data`), `-k N` number of results (default 5).
+
+## 3. Final search engine (Milestone 3)
+
+Rebuild the index using the command in step 1, then try a query:
+
+```
+python search.py -q "machine lerning" -k 10
+```
+
+The indexer skips duplicate and near-duplicate pages. Search uses BM25 ranking
+with extra weight for matches in titles and URLs. It skips very common words
+when more specific terms are present and tries spelling corrections and
+partial matches when there are too few results.
+
+See [TEST.txt](TEST.txt) for the 20 test queries and what changed for the ones
+that performed poorly.
