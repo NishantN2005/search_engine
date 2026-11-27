@@ -43,3 +43,17 @@ partial matches when there are too few results.
 
 See [TEST.txt](TEST.txt) for the 20 test queries and what changed for the ones
 that performed poorly.
+
+## 4. Web interface (extra credit)
+
+```
+python web_gui.py                     # opens http://localhost:8000 in your browser
+python web_gui.py --port 8080 --no-browser
+```
+
+Options: `--index DIR` (default `index_data`), `--port N` (default 8000),
+`--no-browser` to skip opening a tab. Only uses the Python standard library.
+
+Type a query and press Enter. Each result shows its rank, URL and BM25
+score, 10 per page (up to 10 pages). A note appears when a spelling was
+corrected or partial matches were added. Stop the server with Ctrl-C.
